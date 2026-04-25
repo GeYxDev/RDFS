@@ -1,0 +1,8 @@
+[book]
+authors = ["NeYx"]
+language = "zh"
+src = "src"
+title = "RDFS Architecture Design"
+
+[build]
+build-dir = "target/html"
