@@ -1,0 +1,12 @@
+[workspace]
+
+members = [
+    "common",     # 公共基础工具层
+    "namenode",   # 集群管理层
+    "datanode",   # 数据存储层
+    "client"      # 客户端应用层
+]
+
+# 统一整个工程的依赖版本防止不同模块冲突
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
