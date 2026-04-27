@@ -8,20 +8,17 @@
 
 ## 1. 核心客户端入口 (`RdfsClient`)
 
-`RdfsClient` 是用户与整个 RDFS 集群交互的唯一上下文。它内部持有了与 NameNode 通信的 gRPC Channel 连接池。
+`RdfsClient` 是用户与整个 RDFS 集群交互的唯一上下文。它内部不仅持有了与 NameNode 通信的连接池，还管理着当前进程的全局身份（`client_id`）以及后台的租约保活任务。
 
 ```rust
 pub struct RdfsClient {
-    // 内部对 NameNode gRPC Client 的封装
+    pub client_id: String, // 客户端全局唯一标识 (UUIDv4)
+    // 内部封装的 NameNode gRPC Client
+    // 内部持有的 Lease Renewer (租约续约) 后台任务句柄
 }
 
 impl RdfsClient {
-    /// 连接到 RDFS 集群 (通常只需要提供 NameNode 的地址)
-    /// 
-    /// # Examples
-    /// ```rust
-    /// let client = RdfsClient::connect("http://127.0.0.1:9000").await?;
-    /// ```
+    /// 连接到 RDFS 集群并完成身份初始化
     pub async fn connect(namenode_addr: &str) -> Result<Self, RdfsError>;
 }
 ```
@@ -100,17 +97,37 @@ impl tokio::io::AsyncSeek for RdfsReader { ... }
 
 ## 4. 流式写入接口 (`RdfsWriter`)
 
-写入接口类似，返回一个实现了 `tokio::io::AsyncWrite` 的 Writer。
+写入是 RDFS 中最复杂的操作。除了基础的覆盖写 (`create`)，我们还需要支持大数据的灵魂操作——追加写 (`append`)。此外，允许用户对每个文件进行精细化配置。
 
 ```rust
+/// 文件创建时的配置选项
+#[derive(Debug, Clone)]
+pub struct CreateOptions {
+    pub replication: u16,   // 副本数，默认 3
+    pub block_size: u64,    // 块大小，默认 64MB
+    pub overwrite: bool,    // 如果存在是否覆盖，默认 false
+}
+
+impl Default for CreateOptions { ... }
+
 impl RdfsClient {
-    /// 创建一个新文件并返回写入器。如果文件已存在，返回覆盖错误。
+    /// 使用默认配置创建新文件
     pub async fn create(&mut self, path: &str) -> Result<RdfsWriter, RdfsError>;
+
+    /// 使用自定义配置创建新文件
+    pub async fn create_with(&mut self, path: &str, options: CreateOptions) -> Result<RdfsWriter, RdfsError>;
+
+    /// 追加写入已存在的文件 (HDFS 核心特性)
+    pub async fn append(&mut self, path: &str) -> Result<RdfsWriter, RdfsError>;
 }
 
 /// RDFS 分布式文件写入器
 pub struct RdfsWriter {
-    // 内部维护了本地的 64KB Chunk Buffer，以及 Write Pipeline 状态
+    // ⚠️ Rust 异步工程铁律：
+    // 由于 AsyncWrite 的 poll_write 是同步上下文，无法直接执行 gRPC 的 .await 操作。
+    // RdfsWriter 内部实际上是一个 mpsc::Sender，它将数据切片推入通道；
+    // 真正的 64MB 切块、申请 AllocateBlock、Pipeline 建立和 Recovery，
+    // 均由底层一个被 spawn 出来的专属异步 Worker 任务 (Receiver) 处理。
 }
 
 #[tokio::async_trait]
@@ -120,18 +137,17 @@ impl tokio::io::AsyncWrite for RdfsWriter {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        // 内部逻辑：
-        // 1. 接收数据，写入本地内存缓存。
-        // 2. 满 64KB 后，发送给当前的 DataNode Pipeline。
-        // 3. 累计发送满 64MB 后，向 NameNode 申请新的 Block，建立新的 Pipeline。
+        // 将 buf 拷贝/转移并推入内部的 mpsc 缓冲通道。
+        // 若通道满（底层背压），则向 cx 注册 Waker 并返回 Poll::Pending。
     }
 
     fn poll_flush(...) -> Poll<Result<(), std::io::Error>> { ... }
 
     /// 极其重要！关流逻辑
     fn poll_shutdown(...) -> Poll<Result<(), std::io::Error>> {
-        // 1. 强制将剩余缓存刷入 Pipeline。
-        // 2. 告知 NameNode 写入完成 (CompleteFile)，更改元数据状态，释放锁。
+        // 1. 发送 EOF 信号给底层 Worker，等待缓冲刷入 DataNode。
+        // 2. 触发 NameNode 的 CompleteFile RPC 调用。
+        // 3. 将文件状态转为 ACTIVE 并释放当前文件的写锁。
     }
 }
 ```
@@ -162,5 +178,8 @@ pub enum RdfsError {
     
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Lease expired or revoked: {0}")]
+    LeaseExpired(String),
 }
 ```

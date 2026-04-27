@@ -9,17 +9,19 @@ Client 是 RDFS (Rust Distributed File System) 与外部世界交互的唯一大
 
 ## 🎯 核心职责
 
-1. **元数据交互 (Metadata Operations):** 向 NameNode 发起 RPC 请求，执行目录创建、文件定位、块申请等控制流操作。
-2. **大文件切片 (File Chunking):** 将用户传入的大文件（如 10GB 的日志），自动在内存中切分为固定大小的 Block（默认 64MB），并进一步切分为 64KB 的 Chunk 进行流式网络传输。
-3. **流水线读写 (Pipeline I/O):** 根据 NameNode 返回的路由表，直接与 DataNode 建立 gRPC Stream，实现高吞吐量的数据读写。
-4. **透明容错 (Transparent Failover):** 在读取数据时，如果当前连接的 DataNode 宕机或返回了错误的 Checksum，Client 必须能够静默地切换到备用副本节点，对上层业务完全透明。
+1. **元数据与租约交互 (Metadata & Lease)：** 向 NameNode 发起 RPC 请求执行控制流操作。在进行写入时，必须在后台静默运行**租约保活 (Lease Renewal)** 任务，防止 NameNode 误判客户端宕机而收回写锁。
+2. **大文件切片与端到端校验 (Chunking & Checksum)：** 将大文件自动切分为 64MB 的 Block 和 64KB 的 Chunk 进行网络传输。在写入时生成 CRC32 校验和；**在读取时必须在本地实时比对校验和**，保障端到端的数据绝对完整。
+3. **流水线读写 (Pipeline I/O)：** 根据路由表，与首个 DataNode 建立单向 gRPC Stream，驱动底层节点自动建立流水线完成 3 副本同步。
+4. **透明容错与管线恢复 (Transparent Failover & Recovery)：**
+    * **读取容错：** 遇到宕机或 Checksum 报错，静默切换至备用节点，并向 NameNode 举报坏块 (`ReportBadBlock`)。
+    * **写入容错 (Pipeline Recovery)：** 写入中途遭遇节点宕机时，静默执行“踢出坏节点 -> 升级 `gen_stamp` -> 长度对齐 -> 降级续传”的管线恢复复杂状态机，对上层 `AsyncWrite` 调用者完全透明。
 
 ## 📦 形态与接口定义 (API Design)
 
 Client 模块将提供两种使用形态：**Rust SDK** 和 **CLI 命令行工具**。
 
 ### 1. 核心 Rust SDK (`src/lib.rs`)
-我们将提供一个类似标准库的纯异步 API：
+提供一个类似标准库的纯异步 API：
 
 ```rust
 use rdfs_client::RdfsClient;
@@ -53,22 +55,28 @@ src/
 ├── lib.rs               # SDK 的公开 API 入口 (RdfsClient)
 ├── bin/
 │   └── rdfs.rs          # 命令行工具 (CLI) 的入口，基于 clap 解析参数
-├── namenode_rpc.rs      # 封装与 NameNode 的所有 gRPC 交互逻辑
-├── datanode_rpc.rs      # 封装与 DataNode 的 gRPC Stream 读写逻辑
+├── namenode_rpc.rs      # 封装与 NameNode 的 gRPC 交互及错误码转换
+├── datanode_rpc.rs      # 封装与 DataNode 的 gRPC Stream 底层通信
+├── lease_renewer.rs     # 后台守护任务：专门负责定期向 NameNode 发送 RenewLease 续约
 └── io/                  # 核心 I/O 抽象引擎
     ├── mod.rs
-    ├── reader.rs        # 实现 AsyncRead，内部自动处理跨 Block 读取和节点切换
-    └── writer.rs        # 实现 AsyncWrite，内部自动处理 64MB 切块和 Pipeline 建立
+    ├── reader.rs        # 实现 AsyncRead，内置 Checksum 实时校验、坏块举报与平滑节点切换
+    └── writer.rs        # 实现 AsyncWrite，内置 64MB 自动切块、EOF 落盘提交 (CompleteFile) 及复杂的 Pipeline Recovery 状态机
 ```
 
-## 🚀 开发里程碑 (Local Milestones)
+## 🚀 开发里程碑
 
-- [ ] **Phase 1: 基础基建**
-    - 引入 `common` 包的 gRPC 客户端代码。
-    - 实现 `namenode_rpc.rs`，跑通简单的 `CreateFile` 和 `GetFileInfo`。
-- [ ] **Phase 2: CLI 骨架搭建**
-    - 引入 `clap` 库，搭建 `rdfs` 命令行的路由结构（ls, mkdir 等只涉及元数据的操作）。
-- [ ] **Phase 3: 写入引擎 (Writer)**
-    - 实现 `RdfsWriter`，跑通：写满 64MB -> 找 NameNode 要新 Block -> 连 DataNode 发送数据的全流程。
-- [ ] **Phase 4: 读取引擎 (Reader)**
-    - 实现 `RdfsReader`，跑通根据 Offset 智能路由到对应 Block 和可用 DataNode 的逻辑。
+- [ ] **Phase 1: 基础基建与元数据骨架**
+    - 引入 `common` 包，实现 `namenode_rpc.rs`。
+    - 实现 `rdfs_client::create` 和 `open`，跑通文件状态交互。
+    - 实现 `lease_renewer.rs` 并在 `create` 时自动唤醒后台续约任务。
+- [ ] **Phase 2: 命令行 CLI 工具**
+    - 引入 `clap` 搭建 `rdfs ls`, `mkdir`, `rm` 等控制流指令。
+- [ ] **Phase 3: 极致读取引擎 (Reader)**
+    - 实现 `RdfsReader` (`AsyncRead`)，跑通单块流式读取。
+    - 加入跨 Block 自动无缝切换逻辑。
+    - **进阶：** 加入流式 Checksum 校验机制，并在失败时调用 `ReportBadBlock`。
+- [ ] **Phase 4: 极致写入引擎 (Writer) 与异常恢复**
+    - 实现 `RdfsWriter` (`AsyncWrite`)，跑通：64KB Chunk 发送 -> 64MB 切块 -> 申请新 Block。
+    - 在文件 `close()` 时拦截处理，调用 `CompleteFile` 正式提交。
+    - **最高难度：** 实现 Pipeline Recovery 状态机（捕获 gRPC 写入异常，调用 NameNode 剔除节点并恢复管线）。

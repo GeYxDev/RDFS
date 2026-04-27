@@ -2,6 +2,8 @@
 
 欢迎参与 RDFS 的开发！本指南将帮助你从零配置本地开发环境，并了解项目的构建、测试与运行流程。
 
+---
+
 ## 1. 环境依赖 (Prerequisites)
 
 RDFS 是一个纯 Rust 项目，但在网络层重度依赖 gRPC。因此，你需要安装 Rust 工具链和 Protobuf 编译器。
@@ -75,45 +77,53 @@ cargo test --workspace
 
 ## 3. 本地集群运行 (Running Locally)
 
-在开发阶段，我们通常在同一台物理机上启动多个进程来模拟分布式集群。
+在开发阶段，我们通常在同一台物理机上启动多个进程来模拟分布式集群。为了方便测试，建议将所有数据存储在 `/tmp/rdfs/` 目录下。
 
-### 3.1 启动 NameNode
-打开第一个终端面板，启动系统的“大脑”：
+### 3.1 启动主节点 (NameNode)
+打开第一个终端面板，启动系统的“大脑”，并指定元数据的持久化目录：
 ```bash
 # NameNode 默认监听 0.0.0.0:9000
-RUST_LOG=info cargo run --bin namenode
+RUST_LOG=info cargo run --bin namenode -- \
+  --name-dir /tmp/rdfs/name
 ```
 
-### 3.2 启动 DataNode
-打开多个新的终端面板，启动多个 DataNode。你需要为它们指定不同的存储目录和 RPC 端口。
-
+### 3.2 启动第二名称节点 (Secondary NameNode)
+打开第二个终端面板，启动负责在后台合并快照与日志的“打杂节点”：
 ```bash
-# 终端 2: 启动 DataNode 1
+RUST_LOG=info cargo run --bin secondary_namenode -- \
+  --namenode-addr [http://127.0.0.1:9000](http://127.0.0.1:9000) \
+  --checkpoint-dir /tmp/rdfs/namesecondary
+```
+
+### 3.3 启动数据节点 (DataNode)
+打开多个新的终端面板，启动多个 DataNode（构成默认的 3 副本集群）。你需要为它们指定不同的物理存储目录和 RPC 端口。
+```bash
+# 终端 3: 启动 DataNode 1
 RUST_LOG=info cargo run --bin datanode -- \
   --data-dir /tmp/rdfs/dn1 \
   --port 9001 \
   --namenode-addr [http://127.0.0.1:9000](http://127.0.0.1:9000)
 
-# 终端 3: 启动 DataNode 2
+# 终端 4: 启动 DataNode 2
 RUST_LOG=info cargo run --bin datanode -- \
   --data-dir /tmp/rdfs/dn2 \
   --port 9002 \
   --namenode-addr [http://127.0.0.1:9000](http://127.0.0.1:9000)
 
-# 终端 4: 启动 DataNode 3
+# 终端 5: 启动 DataNode 3
 RUST_LOG=info cargo run --bin datanode -- \
   --data-dir /tmp/rdfs/dn3 \
   --port 9003 \
   --namenode-addr [http://127.0.0.1:9000](http://127.0.0.1:9000)
 ```
 
-### 3.3 使用 CLI 客户端测试
-打开第五个终端，使用编译好的 CLI 工具对集群进行操作：
+### 3.4 使用 CLI 客户端测试
+打开第六个终端，使用编译好的 CLI 工具对集群进行读写操作：
 ```bash
 # 创建目录
 cargo run --bin rdfs -- mkdir /user/data
 
-# 上传本地文件到 RDFS
+# 上传本地文件到 RDFS (默认 3 副本)
 cargo run --bin rdfs -- put ./Cargo.toml /user/data/Cargo.toml
 
 # 查看目录状态
