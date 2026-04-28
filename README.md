@@ -4,22 +4,25 @@
 ![Architecture](https://img.shields.io/badge/architecture-Centralized_Master-blue.svg)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-RDFS 是一个使用 Rust 语言从零开发的、深度借鉴 HDFS 核心架构思想的工业级分布式文件系统。本项目旨在利用 Rust 卓越的内存安全特性和无数据竞争的并发模型，构建一个**轻量、高吞吐、强容错**的分布式存储底层基础设施。
+RDFS 是一个使用 Rust 语言从零开发的、深度借鉴 HDFS 核心架构思想的实验型分布式文件系统。
+本项目旨在利用 Rust 卓越的内存安全特性和无数据竞争的并发模型，构建一个 **轻量、高吞吐、强容错** 的分布式存储底层基础设施。
+期望在不断迭代完善后，该系统具备工业级能力。
 
 ## 🎯 设计目标
 
-* **极致并发与安全：** 利用 Rust 的所有权机制和 `tokio` 异步运行时，实现无锁化/分段锁的高吞吐元数据管理，彻底杜绝内存泄漏和数据竞争。
-* **零开销数据流：** 引入基于 gRPC (HTTP/2) 的 **背压流控 (Backpressure)**，摒弃冗余的业务层 ACK，实现 Client 与 DataNode 之间的零拷贝流水线 (Pipeline) 复制。
-* **坚不可摧的容错：** 引入 **世代版本号** 隔离机制杜绝分布式脑裂，并在客户端内置极其复杂的 **管线异常恢复 (Pipeline Recovery)** 状态机，实现故障对上层业务的完全透明。
+* **极致并发与内存安全：** 利用 Rust 的所有权机制和 `tokio` 异步运行时，实现分段锁的高吞吐元数据管理，彻底杜绝内存泄漏和数据竞争。
+* **零开销背压数据流：** 引入基于 gRPC (HTTP/2) 的 **背压流控 (Backpressure)**，摒弃冗余的业务层 ACK，实现 Client 与 DataNode 之间的零拷贝流水线 (Pipeline) 复制。
+* **坚不可摧的分布式容错：** 引入 **世代版本号 (Generation Stamp)** 隔离机制杜绝分布式脑裂，并在客户端内置极其复杂的 **管线异常恢复 (Pipeline Recovery)** 状态机，实现故障对上层业务的完全透明。
+* **细粒度数据安全控制：** 引入基于 HMAC-SHA256 的去中心化 Token 鉴权机制。杜绝恶意客户端绕过中心节点直连窃取或篡改数据，实现工业级的数据隔离防线。
 
 ## 🏗️ 系统架构
 
 RDFS 包含四个核心逻辑组件：
 
-1. **NameNode (元数据主节点)：** 系统的“大脑”。负责管理全局扁平化目录树（Namespace）与租约（Lease），维护文件块到物理节点的逻辑映射。**绝对不触碰实际数据流。**
+1. **NameNode (元数据主节点)：** 系统的“大脑”。负责管理全局扁平化目录树（Namespace）与租约（Lease），维护文件块到物理节点的逻辑映射，统筹集群 MasterKey 并为合法请求签发安全访问令牌（Block Token），**绝对不触碰实际数据流**。
 2. **Secondary NameNode (第二名称节点)：** 系统的“打杂节点”。专职在后台拉取并合并 NameNode 的 EditLog (写前日志) 和 FsImage (内存快照)，防止主节点 OOM 并加速重启。
-3. **DataNode (数据存储节点)：** 系统的“苦力”。负责数据块（Chunk）在本地磁盘的流式读写，执行 NameNode 下发的容错指令，并在后台运行块扫描器主动防御静默损坏。
-4. **Client (重客户端)：** 用户的“大门”。将底层的 gRPC 交互、大文件切片、端到端 Checksum 实时校验、以及节点宕机时的断点降级续传，封装为极简的 `AsyncRead / AsyncWrite` 接口。
+3. **DataNode (数据存储节点)：** 系统的“苦力”。负责数据块（Chunk）在本地磁盘的流式读写，执行 NameNode 下发的容错指令，在 I/O 层面实时执行端到端 Checksum 校验与 Token 去中心化验签，并在后台运行块扫描器主动防御静默损坏。
+4. **Client (重客户端)：** 用户的“大门”。将底层的 gRPC 交互、大文件切片、Token 自动透传鉴权、端到端 Checksum 实时校验、以及节点宕机时的断点降级续传，封装为极简的接口。
 
 ## 📁 项目结构
 
@@ -27,9 +30,9 @@ RDFS 包含四个核心逻辑组件：
 
 ```text
 RDFS/
-├── common/              # 公共模块：RPC Protobuf 定义、全局错误处理、通用工具函数
-├── namenode/            # NameNode 核心：包含网络服务、内存 Inode Tree、持久化机制
-├── datanode/            # DataNode 核心：本地磁盘管理、心跳服务
+├── common/              # 公共模块：RPC Protobuf 定义、全局错误处理、通用工具函数、加密鉴权算法
+├── namenode/            # NameNode 核心：包含网络服务、内存分段锁 Inode Tree、持久化机制
+├── datanode/            # DataNode 核心：本地磁盘管理、Token 验签拦截器、心跳服务
 ├── client/              # 客户端 SDK 和 CLI 命令行工具
 └── docs/                # 系统全套架构设计图纸
 ```
@@ -50,7 +53,6 @@ RDFS/
 * Protocol Buffers 编译器 (`protoc`)
 
 ### 构建与运行本地伪分布式集群
-
 > 详细的调试技巧与 IDE 配置请参阅 `docs/guide.md`。
 
 1. **编译全量项目**

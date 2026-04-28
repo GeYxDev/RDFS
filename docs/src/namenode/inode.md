@@ -80,6 +80,7 @@ pub struct Inode {
 ```rust
 use std::sync::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 
 /// 整个 NameNode 的核心内存状态
 pub struct NamespaceMap {
@@ -88,7 +89,7 @@ pub struct NamespaceMap {
     inodes: RwLock<HashMap<u64, Inode>>,
     
     /// ID 生成器
-    next_inode_id: RwLock<u64>,
+    next_inode_id: AtomicU64,
 }
 
 impl NamespaceMap {

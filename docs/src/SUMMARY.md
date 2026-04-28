@@ -19,6 +19,7 @@
 - [RPC 通信协议规范 (RPC Protocol)](protocols/rpc.md)
 - [核心工作流：读取与写入 (Read/Write Pipeline)](protocols/pipeline.md)
 - [容错与副本恢复机制 (Fault Tolerance)](protocols/recovery.md)
+- [安全与访问控制 (Security & Access Control)](protocols/auth.md)
 
 # 开发与部署 (Development)
 

@@ -18,42 +18,48 @@
 在 RDFS 的 V1.0 架构设计中，我们追求以下几个核心目标：
 
 1. **架构极简主义与职责隔离 (Simplicity & Isolation)**
-   * 采用**中心化单 Master 架构**（单一 NameNode 负责控制流，配合 Secondary NameNode 卸载合并压力）。
+   * 采用 **中心化单 Master 架构**（单一 NameNode 负责控制流，配合 Secondary NameNode 卸载合并压力）。
    * 初期不引入 Paxos/Raft 等复杂的分布式共识算法，将精力集中在最核心的分布式文件切片、网络流水线（Pipeline）传输上。
-2. **高吞吐量的顺序读写 (High Throughput)**
-   * 专为**大文件**（GB/TB级别）存储设计，采用大文件块（默认 64MB）进行存储，以榨干网络带宽并减少元数据开销。
+2. **极致并发与高吞吐量读写 (High Throughput)**
+   * 专为 **大文件**（GB/TB级别）存储设计，采用大文件块（默认 64MB）进行存储，以榨干网络带宽并减少元数据开销。
    * 支持客户端与数据节点（DataNode）之间的直接数据流传输，NameNode 仅负责元数据调度，绝对不参与数据流转。
+   * 引入基于 DashMap 的 **分段锁（Sharded Lock）** 目录树，实现极高的并发写入吞吐。
 3. **高可用与无缝容错 (Fault Tolerance)**
    * 秉持“硬件总是不可靠”的假设。支持 3 副本机制与后台主动坏块扫描。
-   * 具备强大的**异常管线恢复 (Pipeline Recovery)** 与宕机自动重平衡机制，对上层业务完全透明。
+   * 具备强大的 **异常管线恢复 (Pipeline Recovery)** 与宕机自动重平衡机制，对上层业务完全透明。
+   * 强制推行 **端到端 Checksum 实时校验**，彻底防御网络层的静默数据损坏。
+4. **工业级数据安全底座 (Security & Access Control)**
+   * 引入基于 HMAC-SHA256 的 **Block Token 鉴权机制**。
+   * 杜绝恶意客户端绕过 NameNode 直连窃取数据，实现数据平面的绝对安全。
 
 ## 3. 明确不做的特性 (Non-Goals)
 
-为了防止功能蔓延，明确系统的边界同样重要。以下功能在 RDFS V1.0 中**不予支持**：
+为了防止功能蔓延，明确系统的边界同样重要。以下功能在 RDFS V1.0 中 **不予支持**：
 
 * **不支持小文件优化**：大量 KB 级别的小文件会迅速耗尽 NameNode 的内存，这违背了本系统为大数据存储设计的初衷。
-* **不支持文件的随机修改**：文件一旦写入，中间的数据块不可被随意覆写替换（Write-Once-Read-Many 语义）。**但系统原生支持大文件末尾的追加写（Append）。**
+* **不支持文件的随机修改**：文件一旦写入，除了从末尾追加数据外，中间的数据块不可被随意覆写替换（Write-Once-Read-Many 语义）。
 * **不支持跨数据中心/机架感知**：初期假设所有的节点都在同一个局域网的高速网络内。
 
-## 4. RDFS 架构图纸导航 (Documentation Map)
+## 4. RDFS 架构图纸导航
 
 RDFS 拥有一套极其严密的架构设计规范。如果你是新加入的开发者，请务必按照以下脉络阅读，它们构成了整个系统的“真理之源”：
 
 ### 🗺️ 第一阶段：宏观蓝图
-* **[核心架构白皮书 (architecture.md)](architecture.md):** 了解四大物理角色（NN, SNN, DN, Client）与整体流转。
+* **[核心架构白皮书 (architecture.md)](architecture.md)：** 了解四大物理角色（NN, SNN, DN, Client）与整体流转。
 
-### 📡 第二阶段：三大核心规范（必读）
-* **[通信协议规范 (rpc.md)](./protocols/rpc.md):** 了解全局 gRPC 接口、增量汇报与流式调用的控制平面。
-* **[核心工作流：读取与写入 (pipeline.md)](./protocols/pipeline.md):** 了解最硬核的背压流控、oneof 切片与断点续传。
-* **[容错与副本恢复机制 (recovery.md)](./protocols/recovery.md):** 了解超时状态机、世代版本号（gen_stamp）防脑裂与主动防御。
+### 📡 第二阶段：三大核心规范
+* **[通信协议规范 (rpc.md)](./protocols/rpc.md)：** 了解全局 gRPC 接口、增量汇报与流式调用的控制平面。
+* **[核心工作流：读取与写入 (pipeline.md)](./protocols/pipeline.md)：** 了解最硬核的背压流控、oneof 切片与断点续传。
+* **[容错与副本恢复机制 (recovery.md)](./protocols/recovery.md)：** 了解超时状态机、世代版本号防脑裂与主动防御。
+* **[安全与访问控制 (auth.md)](./protocols/auth.md)：** 了解 Block Token 签发、HMAC 验签与 MasterKey 动态轮转机制。
 
 ### ⚙️ 第三阶段：组件内部深度设计
-* **[NameNode 内存模型 (inode.md)](./namenode/inode.md):** 了解如何利用 Rust 的扁平化哈希表与带载荷枚举榨干内存。
-* **[NameNode 持久化 (persistence.md)](./namenode/persistence.md):** 了解 TxID 与 Secondary NameNode 的 Checkpoint 机制。
-* **[DataNode 本地存储 (storage.md)](./datanode/storage.md):** 了解极致的零拷贝物理磁盘布局与 O(1) 启动校验。
-* **[DataNode 心跳机制 (heartbeat.md)](./datanode/heartbeat.md):** 了解基于 mpsc 通道的非阻塞状态机。
+* **[NameNode 内存模型 (inode.md)](./namenode/inode.md)：** 了解如何利用 Rust 的扁平化哈希表与带载荷枚举充分利用内存。
+* **[NameNode 持久化 (persistence.md)](./namenode/persistence.md)：** 了解 TxID 与 Secondary NameNode 的 Checkpoint 机制。
+* **[DataNode 本地存储 (storage.md)](./datanode/storage.md)：** 了解极致的零拷贝物理磁盘布局与 O(1) 启动校验。
+* **[DataNode 心跳机制 (heartbeat.md)](./datanode/heartbeat.md)：** 了解基于 mpsc 通道的非阻塞状态机。
 
 ### 🚀 第四阶段：工程落地与开发
-* **[客户端 SDK 接口规范 (api.md)](./client/api.md):** 了解如何将复杂的分布式管线封装为极简的 `AsyncRead/AsyncWrite`。
-* **[开发环境与构建指南 (guide.md)](./development/guide.md):** 从零配置环境并运行本地伪分布式集群。
-* **[里程碑与未来计划 (milestones.md)](./development/milestones.md):** 了解 V1.0 的冲刺任务与未来的高阶演进方向。
+* **[客户端 SDK 接口规范 (api.md)](./client/api.md)：** 了解如何将复杂的分布式管线封装为极简的 API。
+* **[开发环境与构建指南 (guide.md)](./development/guide.md)：** 从零配置环境并运行本地伪分布式集群。
+* **[里程碑与未来计划 (milestones.md)](./development/milestones.md)：** 了解 V1.0 的冲刺任务与未来的高阶演进方向。
