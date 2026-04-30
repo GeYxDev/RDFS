@@ -1,15 +1,14 @@
 # API 接口设计 (API Design)
 
-本章节定义了 `rdfs-client` 包对外暴露的 Rust API 规范。设计的核心原则是**符合 Rust 异步生态直觉 (Idiomatic Async Rust)**，尽量抹平本地文件系统与分布式文件系统之间的认知差异。
+本章节定义了 `rdfs-client` 包对外暴露的 Rust API 规范。设计的核心原则是 **符合 Rust 异步生态直觉 (Idiomatic Async Rust)**，尽量抹平本地文件系统与分布式文件系统之间的认知差异。
 
-使用者无需关心“Block 切片”、“网络流水线”、“节点重试”等底层细节，只需调用符合 `tokio::io` 标准特征 (Traits) 的方法即可完成流式读写。
+使用者无需关心“Block 切片”、“网络流水线”、“节点重试”、“Token 鉴权”等底层细节，只需调用符合 `tokio::io` 标准特征 (Traits) 的方法即可完成流式读写。
 
 ---
 
 ## 1. 核心客户端入口 (`RdfsClient`)
 
 `RdfsClient` 是用户与整个 RDFS 集群交互的唯一上下文。它内部不仅持有了与 NameNode 通信的连接池，还管理着当前进程的全局身份（`client_id`）以及后台的租约保活任务。
-
 ```rust
 pub struct RdfsClient {
     pub client_id: String, // 客户端全局唯一标识 (UUIDv4)
@@ -28,7 +27,6 @@ impl RdfsClient {
 ## 2. 元数据操作接口 (Namespace API)
 
 这些接口主要负责目录结构的变更和文件属性的查询。它们本质上是对 NameNode 的轻量级 RPC 封装。
-
 ```rust
 impl RdfsClient {
     /// 创建单级或多级目录
@@ -41,7 +39,7 @@ impl RdfsClient {
     /// 列出指定目录下的所有文件和子目录状态
     pub async fn list_status(&mut self, path: &str) -> Result<Vec<FileStatus>, RdfsError>;
 
-    /// 获取单个文件或目录的详细属性
+    /// 获取单个文件或目录的详细属性，并获取对应数据块的 Access Token
     pub async fn get_file_info(&mut self, path: &str) -> Result<FileStatus, RdfsError>;
 }
 
@@ -60,7 +58,6 @@ pub struct FileStatus {
 ## 3. 流式读取接口 (`RdfsReader`)
 
 对于文件读取，我们提供 `open` 方法，返回一个实现了 `tokio::io::AsyncRead` 的定制化 Reader。这是实现极高吞吐量的关键。
-
 ```rust
 impl RdfsClient {
     /// 打开一个存在的文件以供读取
@@ -69,7 +66,7 @@ impl RdfsClient {
 
 /// RDFS 分布式文件读取器
 pub struct RdfsReader {
-    // 内部维护了当前读取到的 BlockId、Offset、以及与 DataNode 的 Stream 状态
+    // 内部维护了当前读取到的 BlockId、Offset、Access Token，以及与 DataNode 的 Stream 状态
 }
 
 // 极其关键的设计：实现 Tokio 的标准异步读 Trait
@@ -82,9 +79,10 @@ impl tokio::io::AsyncRead for RdfsReader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         // 内部逻辑：
-        // 1. 如果当前 Block 没读完，从当前的 DataNode Stream 中拉取数据填充 buf。
-        // 2. 如果当前 Block 读完了，静默向 NameNode 获取下一个 Block 的物理位置，无缝切换到下一个 DataNode 连结。
-        // 3. 如果遇到 Checksum 错误或连接断开，静默尝试备用节点。
+        // 1. 发起请求：向 DataNode 发送 Read 请求，并出示该 Block 的 Token 凭证进行鉴权。
+        // 2. 拉取与校验：如果当前 Block 没读完，从 Stream 中拉取数据填充 buf，并实时比对 Checksum 校验和。
+        // 3. 容错与举报：如果遇到 Checksum 错误或连接断开，静默向 NameNode 举报坏块，并尝试备用节点。
+        // 4. 跨块切换：如果当前 Block 读完了，静默向 NameNode 获取下一个 Block 的物理位置和新 Token，无缝切换。
     }
 }
 
@@ -97,8 +95,7 @@ impl tokio::io::AsyncSeek for RdfsReader { ... }
 
 ## 4. 流式写入接口 (`RdfsWriter`)
 
-写入是 RDFS 中最复杂的操作。除了基础的覆盖写 (`create`)，我们还需要支持大数据的灵魂操作——追加写 (`append`)。此外，允许用户对每个文件进行精细化配置。
-
+写入是 RDFS 中最复杂的操作。除了基础的覆盖写 (`create`)，我们还需要支持大数据的灵魂操作——追加写 (`append`)。
 ```rust
 /// 文件创建时的配置选项
 #[derive(Debug, Clone)]
@@ -126,7 +123,8 @@ pub struct RdfsWriter {
     // ⚠️ Rust 异步工程铁律：
     // 由于 AsyncWrite 的 poll_write 是同步上下文，无法直接执行 gRPC 的 .await 操作。
     // RdfsWriter 内部实际上是一个 mpsc::Sender，它将数据切片推入通道；
-    // 真正的 64MB 切块、申请 AllocateBlock、Pipeline 建立和 Recovery，
+    // 真正的大文件切块、向 NameNode 申请 AllocateBlock (附带 Token)、
+    // 建立双向流 (Bidi-Stream)、处理逆流 ACK、以及 Pipeline Recovery 等复杂状态机，
     // 均由底层一个被 spawn 出来的专属异步 Worker 任务 (Receiver) 处理。
 }
 
@@ -143,11 +141,12 @@ impl tokio::io::AsyncWrite for RdfsWriter {
 
     fn poll_flush(...) -> Poll<Result<(), std::io::Error>> { ... }
 
-    /// 极其重要！关流逻辑
+    /// 极其重要！关流与安全退出逻辑
     fn poll_shutdown(...) -> Poll<Result<(), std::io::Error>> {
         // 1. 发送 EOF 信号给底层 Worker，等待缓冲刷入 DataNode。
+        // ⚠️ 必须设置超时机制 (Timeout)：防止 Worker 在尝试无望的 Pipeline Recovery 时陷入死锁，导致上层应用被永久挂起。
         // 2. 触发 NameNode 的 CompleteFile RPC 调用。
-        // 3. 将文件状态转为 ACTIVE 并释放当前文件的写锁。
+        // 3. 将文件状态转为 ACTIVE 并释放当前文件的写锁 (Lease)。
     }
 }
 ```
@@ -157,7 +156,6 @@ impl tokio::io::AsyncWrite for RdfsWriter {
 ## 5. 错误处理 (`RdfsError`)
 
 统一包装分布式系统中的各类异常，方便用户通过 `match` 表达式进行精确的错误处理。
-
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum RdfsError {
@@ -167,6 +165,9 @@ pub enum RdfsError {
     #[error("Permission denied for path: {0}")]
     PermissionDenied(String),
 
+    #[error("Authentication failed: invalid or expired block token")]
+    Unauthenticated(String),
+    
     #[error("No available data nodes to replicate block")]
     NoAvailableDataNodes,
 
