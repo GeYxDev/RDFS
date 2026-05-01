@@ -36,7 +36,7 @@ NameNode 的核心是为应对海量高并发设计的内存模型。
 1. **获取租约：** Client 向 NameNode 申请 `CreateFile` 或 `Append`，获得文件的独占写锁（Lease），文件进入构建中状态。
 2. **分配管线：** Client 发起 `AllocateBlock`，NameNode 分配全新的 `block_id`、`gen_stamp`，使用当前 MasterKey 生成包含写入权限的 Block Token，并按策略返回 3 个健康的 DataNode 地址及该 Token。
 3. **流水线推送与背压：** Client 将数据切分为 64KB 的 Chunk，与首个 DataNode 建立双向 gRPC Stream。建立连接的首包（Metadata）中必须携带上述 Block Token，DataNode 校验通过后才允许建立流水线。数据如同流水线般 `Client -> DN1 -> DN2 -> DN3` 边写边转。全程依赖 HTTP/2 **背压 (Backpressure)** 进行零开销流控。
-4. **容错与状态提交：** 若中途节点宕机，Client 自动剔除坏节点、升级版本号并降级续传。写完后调用 `CompleteFile` 正式闭环。
+4. **容错与状态提交：** DataNode 落盘前必须强制进行 Checksum 二次校验。若中途节点宕机，Client 自动剔除坏节点、升级版本号并降级续传。写完后调用 `CompleteFile` 正式闭环。
 
 ### 4.2 读取数据流 (Read Path)
 1. **获取元数据：** Client 发起 `GetFileInfo` 请求，获取该文件所有 Block 的位置清单及安全访问 Token。

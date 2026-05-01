@@ -12,7 +12,7 @@
 *目标：在不涉及网络通信的情况下，构建系统的“大脑”。*
 - [x] 搭建 Cargo Workspace 目录结构。
 - [x] 完成核心架构文档（Design Docs）编写。
-- [ ] 引入 `DashMap` 与 `AtomicU64`，实现 `Inode Tree` 的分段锁并发增删改查逻辑。
+- [ ] 实现 `Inode Tree` 的读写分离模型：写操作通过 `NameSystemActor` 单线程串行处理，读操作直接并发查询 `DashMap`。
 - [ ] 编写覆盖率大于 80% 的单元测试，确保路径解析、哈希表操作无死锁。
 
 ### 📌 v0.2: 通信基建与安全鉴权 (RPC, Token & Distribution)

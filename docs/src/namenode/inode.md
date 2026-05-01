@@ -7,7 +7,7 @@
 ## 1. 设计目标
 
 * **纯内存操作：** 所有的路径解析、文件创建、目录遍历都必须在内存中完成，保证极低的延迟。
-* **高并发安全：** NameNode 需要同时处理成百上千个 Client 的 RPC 请求，内存模型必须摒弃全局大锁，采用分片机制实现无阻塞的并发读写。
+* **高并发安全：** NameNode 需要同时处理成百上千个 Client 的 RPC 请求，内存模型必须读分片无锁并发、写操作单线程串行执行，彻底规避死锁并保障并发安全。
 * **低内存占用：** 尽量紧凑地设计数据结构，以便单台 NameNode 能够支撑上亿级别的文件元数据。
 
 ---
@@ -69,13 +69,16 @@ pub struct Inode {
 
 在 Rust 中构建树状结构，如果使用传统的嵌套指针（如 `Arc<RwLock<Inode>>` 互相嵌套），在处理路径解析或跨目录移动时极易触发 **隐式锁排序死锁**。
 
-为了实现极致并发，RDFS 采用了 **扁平化并发 ID 映射表 (Sharded Arena Tree)** 方案，将整棵树“压平”，利用 `DashMap`（分段锁并发字典）将全局锁竞争拆解为局部并发。
+为了实现极致并发，RDFS 采用了 **扁平化并发 ID 映射表 (Sharded Arena Tree)** 方案，将整棵树“压平”，利用 **Actor 状态机组合 DashMap 的读写分离架构** 将全局锁竞争拆解为安全的局部并发。
 ```rust
-use std::sync::RwLock;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// 整个 NameNode 的核心内存状态
+/// 在读写分离架构中，该结构通常被 Arc 包裹。
+/// - gRPC Handler 拥有只读访问权（直接查询 DashMap）
+/// - NameSystem Actor 拥有唯一的写权限（负责修改 DashMap）
 pub struct NamespaceMap {
     /// 存放系统中所有的 Inode (扁平化存储)
     /// Key: Inode ID, Value: Inode 实体
@@ -87,8 +90,8 @@ pub struct NamespaceMap {
 
 impl NamespaceMap {
     /// 初始化系统，并自动创建根目录 "/"
-    pub fn new() -> Self {
-        let mut inodes = HashMap::new();
+    pub fn new() -> Arc<Self> {
+        let mut inodes = DashMap::new();
         // 根目录的 ID 永远是 0，它的父节点指向自己
         let root_inode = Inode {
             id: 0,
@@ -100,11 +103,11 @@ impl NamespaceMap {
             },
         };
         inodes.insert(0, root_inode);
-        
-        Self {
+
+        Arc::new(Self {
             inodes,
             next_inode_id: AtomicU64::new(1),
-        }
+        })
     }
 
     /// 获取新 Inode ID (无锁调用，不阻塞目录树)
@@ -130,13 +133,28 @@ impl NamespaceMap {
 
 ---
 
-## 5. 并发控制与防死锁规范 (Deadlock Prevention)
+## 5. 并发控制与安全保证 (Concurrency & Security)
 
-虽然 `DashMap` 解决了不同目录并行写入的全局锁问题，但在执行 **跨分片原子操作**（如 `mv /dir1/a /dir2/b` 需要同时修改 `dir1` 和 `dir2` 的元数据）时，如果不加规范，会产生严重的 **AB-BA 死锁**。
+如果直接使用 `DashMap` 的分片锁来执行跨目录的写操作（如 `rename`），极易触发隐式的死锁问题。为了实现最高级别的系统稳定性与写操作的强一致性，RDFS 摒弃了复杂的细粒度锁排序机制，转而采用 **读写分离的 Actor 模型**。
 
-### 工程规约：强制锁排序 (Lock Ordering by ID)
-在 RDFS 的内部实现中，任何需要同时获取多个 Inode 引用的操作，**必须严格遵守按照 `Inode ID` 从小到大的顺序获取锁**。
-* **错误示例：** 执行 `mv` 时，先获取源目录的写锁，再获取目标目录的写锁。如果线程 1 移动 A 到 B，线程 2 移动 B 到 A，必定死锁。
-* **正确规范：** 先比较源目录 ID 和目标目录 ID。始终先 `get_mut()` 较小的 ID，再 `get_mut()` 较大的 ID。
+### 5.1 最终一致性读模型
+* 对于跨多个 Inode 的写操作（如 `rename`、跨目录移动、文件创建），由于 DashMap 各分片独立更新且读操作不加全局锁，外部读者 **可能短暂观察到中间状态**（例如文件在源目录已消失但目标目录尚未出现）。
+* 这一窗口极短（仅相当于单线程 Actor 内两次 DashMap 写入之间），在正常的 RPC 超时重试机制下，客户端通过指数退避重试即可最终获得一致结果。
+* NameNode **不对外提供跨操作的事务性快照读**，这是与 HDFS 全局读写锁模型的一个重要设计取舍，目的是消除 NameNode 的读锁瓶颈，支撑更高并发。
 
-通过这一强制规约，配合 `AtomicU64` 消除的发号器全局锁，RDFS 能够在异步环境中实现工业级的并发安全性与极高的元数据吞吐量。
+### 5.2 读操作：无锁并发
+对于文件系统的绝大多数操作（如 `GetFileInfo`, `GetBlockLocations` 以及 Client 的心跳寻址），并发度极高：
+* gRPC Handler 线程直接通过 `inodes.get(&id)` 访问 `DashMap`。
+* 仅在提取数据的极短时间内持有该分片的底层读锁，提取完毕后立刻 Drop 释放。
+* 读操作完全不阻塞，也不会被系统的其他写操作长时间阻塞，达到了极致的读吞吐量。
+
+### 5.3 写操作：绝对串行
+任何试图改变命名空间状态的操作（如 `CreateFile`, `Mkdir`, `Rename`），**绝对禁止** 直接修改 `DashMap`。
+1. **指令封装：** gRPC Handler 接收到写请求后，将其封装为 `Command`，通过 Tokio 的 `mpsc::channel` 发送给后台唯一的 NameSystem Actor，并等待 oneshot 回调。
+2. **串行执行：** NameSystem Actor 以单线程事件循环的方式，依次从管道中拉取指令。
+3. **两阶段提交：**
+    * **落盘：** Actor 首先将该操作序列化为 `EditLogOp`，随后通过 `spawn_blocking` 执行同步 `fsync` 并等待结果。
+    * **写内存：** 日志落盘后，Actor 作为 **全系统唯一的写入者**，直接修改 `DashMap`（此时绝无其他线程与其竞争写锁，绝对不会发生死锁）。
+4. **返回结果：** 内存更新完毕后，通过 oneshot channel 唤醒 gRPC Handler 响应 Client。
+
+通过这一架构，RDFS 实现了 EditLog 与内存状态的 100% 严格一致，彻底移除了并发修改目录树的心智负担与死锁风险。
