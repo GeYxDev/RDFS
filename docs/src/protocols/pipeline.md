@@ -26,11 +26,14 @@
 
 ### 1.2 异常管线恢复 (Pipeline Recovery)
 如果在流水线传输中途，某个节点（如 DN2）突然宕机或断网，RDFS 依靠以下机制实现无缝断点续传：
-1. **中断与暂停：** DN1 发现向 DN2 转发超时，断开连接并向上游 Client 抛出 gRPC 异常。Client 暂停发送新数据。
-2. **剔除与版本升级：** Client 向 NameNode 发起重新分配管线请求，NameNode 将宕机的 DN2 从副本列表中踢出，并将该 Block 的 `gen_stamp` 升级，防止 DN2 假死恢复后其残留的旧数据污染读取。
-3. **长度对齐：** Client 与幸存的 DN1、DN3 沟通，获取它们各自实际安全落盘的字节数，取 **最小值**。随后 Client 再次下发截断指令，要求节点剔除超出该最小值的脏数据，并将本地磁盘块的 `gen_stamp` 更新同步至最新版本。
-4. **降级续传：** Client 构建新的管线 `Client -> DN1 -> DN3`，从对齐的位置继续发送剩余的 Chunk。
-5. **事后补偿：** 缺少的第三个副本将在后续 NameNode 处理心跳时，通过 `DataNodeCommand` 指挥集群后台自动补齐。
+1. **中断暂停：** DN1 发现向 DN2 转发超时，断开连接并向上游 Client 抛出 gRPC 异常，Client 暂停发送新数据。
+2. **故障上报：** Client 向 NameNode 发送 `ReportFailedBlock`，报告 DN2 宕机。
+3. **版本升级：** NameSystem Actor 将 DN2 从副本列表移除，升级 `gen_stamp`，返回新的 `gen_stamp`、新管线 `[DN1, DN3]` 及对应的写入 Token。
+4. **长度对齐：** NameSystem Actor 串行处理该请求：
+    * Client 用新管线直连 DN1 和 DN3，查询各自实际落盘长度，取最小值。
+    * Client 下发截断指令，要求各幸存节点将数据截断至最小值，并将本地 `gen_stamp` 更新为新版本。
+5. **重配续传：** Client 构建新的管线 `Client -> DN1 -> DN3`，从对齐的位置继续发送剩余的 Chunk。
+6. **事后补偿：** 缺少的第三个副本将在后续 NameNode 处理心跳时，通过 `DataNodeCommand` 指挥集群后台自动补齐。
 
 ---
 

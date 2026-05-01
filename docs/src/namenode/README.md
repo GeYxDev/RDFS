@@ -58,7 +58,7 @@ src/
 - [ ] **Phase 3：集群状态与容错闭环**
   - 实现心跳接收器，用后台定时任务剔除超时的 DataNode，在心跳 Response 中将 MasterKey 下发给 DataNode。
   - 对接 DataNode 的 `BlockReport` 和 `BlockReceived` 逻辑。
-  - 实现下发节点剔除与 `gen_stamp` 升级的指令逻辑。
+  - 实现故障节点剔除后的副本重平衡指令下发（`ReplicateBlock` / `DeleteBlock`）。
 - [ ] **Phase 4：持久化机制**
   - 实现 EditLog 的追加写入（包含 Token 密钥的持久化）。
   - 实现 FsImage 的加载与保存，为 SNN 预留 Checkpoint 接口。

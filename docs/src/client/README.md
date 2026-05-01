@@ -81,4 +81,4 @@ src/
     - 实现 `RdfsWriter` (`AsyncWrite`)，建立全双工 `mpsc` 模型，并发处理 Send 和 ACK Recv。
     - 跑通完整链路：Token 透传 -> 64KB Chunk 发送 -> 接收 ACK -> 64MB 切块 -> 申请新 Block。
     - 在文件 `close()` 时拦截处理，调用 `CompleteFile` 正式提交。
-    - 实现 Pipeline Recovery 状态机（捕获 gRPC 写入异常，调用 NameNode 剔除节点并恢复管线）。
+    - 实现 Pipeline Recovery 状态机（捕获 gRPC 写入异常，经 NameNode 授权后由 Client 执行流水线恢复）。
