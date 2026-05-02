@@ -15,8 +15,9 @@ Client 是 RDFS (Rust Distributed File System) 与外部世界交互的唯一大
 3. **大文件切片与端到端校验 (Chunking & Checksum)：** 将大文件自动切分为 64MB 的 Block 和 64KB 的 Chunk 进行网络传输。在写入时生成 Checksum 校验和；**在读取时必须在本地实时比对校验和**，保障端到端的数据绝对完整。
 4. **双向流水线读写与 ACK (Bidi-Pipeline I/O)：** 根据路由表，与首个 DataNode 建立 **双向 gRPC Stream**，客户端必须同时运行“发送任务”（推数据）和“接收任务”（接收底层传回的 `WriteChunkResponse` ACK），以此实现无等待的滑动窗口高吞吐。
 5. **透明容错与管线恢复 (Transparent Failover & Recovery)：**
-    * **读取容错：** 遇到宕机或 Checksum 报错，静默切换至备用节点，并向 NameNode 举报坏块 (`ReportBadBlock`)。
+    * **读取容错 (Read Tolerance)：** 遇到宕机或 Checksum 报错，静默切换至备用节点，并向 NameNode 举报坏块 (`ReportBadBlock`)。
     * **写入容错 (Pipeline Recovery)：** 写入中途遭遇节点宕机（或长时间收不到 ACK）时，静默执行“踢出坏节点 -> 升级 `gen_stamp` -> 长度对齐 -> 降级续传”的管线恢复复杂状态机，对上层 `AsyncWrite` 调用者完全透明。
+    * **提交重试 (Commit Retry)：** 在 `close()` 调用 `CompleteFile` 时，若 NameNode 因末块副本数不足而拒绝提交（竞态窗口），Client 必须自动重试（间隔 6 秒，最多 10 次），直到提交成功或超时失败。此过程对上层用户透明。
 
 ## 📦 形态与接口定义 (API Design)
 

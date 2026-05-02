@@ -142,6 +142,8 @@ impl NamespaceMap {
 * 这一窗口极短（仅相当于单线程 Actor 内两次 DashMap 写入之间），在正常的 RPC 超时重试机制下，客户端通过指数退避重试即可最终获得一致结果。
 * NameNode **不对外提供跨操作的事务性快照读**，这是与 HDFS 全局读写锁模型的一个重要设计取舍，目的是消除 NameNode 的读锁瓶颈，支撑更高并发。
 
+> **一致性边界：** RDFS 不提供单调读（Monotonic Read）或“读己之写”（Read-Your-Writes）保证。例如，rename 操作后短时间内 list 目录可能看不到新路径，或读到部分更新后的中间状态。客户端应使用指数退避重试（如初始 10ms，退避因子 2，最大 1s）直到获得预期结果。
+
 ### 5.2 读操作：无锁并发
 对于文件系统的绝大多数操作（如 `GetFileInfo`, `GetBlockLocations` 以及 Client 的心跳寻址），并发度极高：
 * gRPC Handler 线程直接通过 `inodes.get(&id)` 访问 `DashMap`。

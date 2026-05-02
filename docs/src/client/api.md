@@ -145,6 +145,9 @@ impl tokio::io::AsyncWrite for RdfsWriter {
     fn poll_shutdown(...) -> Poll<Result<(), std::io::Error>> {
         // 1. 发送 EOF 信号给底层 Worker，等待缓冲刷入 DataNode。
         // ⚠️ 必须设置超时机制 (Timeout)：防止 Worker 在尝试无望的 Pipeline Recovery 时陷入死锁，导致上层应用被永久挂起。
+        //    - 默认超时值为 heartbeat_interval * 3（如 3s * 3 = 9 秒，可配置）。
+        //    - 若超时，Worker 任务应立即放弃未完成的数据，返回 io::ErrorKind::TimedOut。
+        //    - 上层 SDK 将该错误转换为 RdfsError::WriteTimeout，用户可据此决定是否重试。
         // 2. 触发 NameNode 的 CompleteFile RPC 调用。
         // 3. 将文件状态转为 ACTIVE 并释放当前文件的写锁 (Lease)。
     }

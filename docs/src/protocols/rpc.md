@@ -52,7 +52,13 @@ NameNode 通过心跳响应向 DataNode 下发的管理指令。
 
 ### 2.5 Token (安全访问令牌)
 由 NameNode 签发，用于 DataNode 去中心化验证客户端权限的凭证。
-* `identifier` (bytes)：包含 `block_id`、`client_id`、权限位（读/写）、过期时间及 `key_id` 等要素的序列化明文。
+* `identifier` (bytes)：包含以下要素的序列化明文：
+  * `block_id` (uint64)：授权操作的数据块 ID。
+  * `gen_stamp` (uint64)：授权时该块当前的世代版本号（防止脑裂脏读/脏写）。
+  * `client_id` (string)：申请该令牌的客户端 UUID。
+  * `access_mode` (uint32)：权限位掩码（例如：`1`=READ, `2`=WRITE, `4`=COPY）。
+  * `expiry_date` (int64)：令牌失效的 Unix 时间戳。
+  * `key_id` (uint32)：签发该令牌所使用的 MasterKey 版本号。
 * `signature` (bytes)：NameNode 使用 MasterKey 对 `identifier` 计算出的 HMAC-SHA256 签名结果。
 
 ---
@@ -103,6 +109,11 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `file_length` (uint64)：文件总大小。
   * `file_status` (enum)：文件当前状态。若客户端不支持脏读，NameNode 可直接对非 ACTIVE 文件返回 gRPC 错误。
   * `blocks` (List<LocatedBlock>)：该文件包含的所有数据块及其物理位置（按网络拓扑距离优化排序）。
+* **错误码：**
+  * `NOT_FOUND`：路径不存在。
+  * `PERMISSION_DENIED`：无权访问。
+  * `FAILED_PRECONDITION`：文件处于 `UNDER_CONSTRUCTION` 状态且客户端要求强一致读。
+  * `UNAVAILABLE`：请求的某个 Block 正处于 `UnderRecovery` 状态，客户端应稍后重试或读取其他副本。
 
 #### 3.1.6 `RenewLease` (租约续约)
 * **场景：** 客户端持有任何文件的写锁时，必须定期向 NameNode 发送心跳续约。
@@ -143,11 +154,12 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
 
 #### 3.1.10 `RecoverLease` (租约恢复请求)
 * **场景：** 新 Client 尝试打开一个处于 UNDER_CONSTRUCTION 状态的文件时，主动请求 NameNode 触发租约恢复。
+* **语义：** 异步触发。NameNode 收到请求后立即返回（不等待恢复完成），在后台启动租约恢复流程。客户端应通过后续调用 `GetFileInfo` 轮询文件状态，直到 `file_status` 变为 ACTIVE，或收到文件不存在的错误（恢复失败被放弃）。
 * **Request：**
   * `path` (string)：需要恢复的文件路径。
   * `client_id` (string)：发起请求的客户端标识。
 * **Response：**
-  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否恢复成功。
+  * *(Empty)*：请求体为空。若文件已存在且未处于 UNDER_CONSTRUCTION，则直接返回成功（无需恢复）；若文件不存在或路径为目录，返回 NOT_FOUND；若 NameNode 成功将恢复任务加入后台队列，返回 OK；若系统繁忙无法接受新恢复任务，返回 RESOURCE_EXHAUSTED。
 
 #### 3.1.11 `SetReplication` (修改副本因子)
 * **场景：** 客户端修改指定文件的期望副本数。

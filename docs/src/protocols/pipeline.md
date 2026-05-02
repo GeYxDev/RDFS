@@ -22,7 +22,11 @@
 4. **物理层确认 (BlockReceived)：**
    当某个 DataNode 成功将该 Block 完全刷入物理磁盘后，会立即异步向 NameNode 发送 `BlockReceived` RPC，告知中心节点该块已安全落盘。
 5. **循环与状态提交 (Commit)：**
-   Block 1 结束后，Client 继续申请 Block 2。当所有数据写完，Client **必须调用** `CompleteFile`。NameNode 校验数据长度无误后，释放该 Client 的租约，将文件状态正式标记为 `ACTIVE`，允许全局读取。
+   Block 1 结束后，Client 继续申请 Block 2。当所有数据写完，Client **必须调用** `CompleteFile`。NameNode 执行以下校验：
+    * 校验文件总长度与预期一致。
+    * 校验最后一个 Block 的已确认副本数是否达到最小副本要求（默认为 1）。由于 DataNode 的 `BlockReceived` 汇报是异步的，Client 写完最后一批数据后，NameNode 可能尚未收齐所有副本的确认。
+    * 若副本数不足，NameNode 拒绝提交并返回 `FAILED_PRECONDITION` 错误，Client 应稍后重试 `CompleteFile`（幂等操作）。重试间隔建议为心跳周期的 2 倍（如 6 秒），直到 NameNode 确认副本数达标。
+    * 若校验通过，释放该 Client 的租约，将文件状态正式标记为 `ACTIVE`，允许全局读取。
 
 ### 1.2 异常管线恢复 (Pipeline Recovery)
 如果在流水线传输中途，某个节点（如 DN2）突然宕机或断网，RDFS 依靠以下机制实现无缝断点续传：
