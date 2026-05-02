@@ -55,6 +55,7 @@ src/
   - 启动 Tonic 服务，实现 `CreateFile`、`AllocateBlock`、`CompleteFile` 核心流转。
   - 实现 `SecretManager`，在 `AllocateBlock` 时计算并下发 Block Token。
   - 实现 `LeaseManager` 及 `RenewLease` 接口。
+  - 实现 `CompleteFile` 最小副本数校验，不足时拒绝提交。
 - [ ] **Phase 3：集群状态与容错闭环**
   - 实现心跳接收器，用后台定时任务剔除超时的 DataNode，在心跳 Response 中将 MasterKey 下发给 DataNode。
   - 对接 DataNode 的 `BlockReport` 和 `BlockReceived` 逻辑。

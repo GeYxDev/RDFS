@@ -31,7 +31,7 @@
 
 ### 📌 v0.4: 容错与恢复 (Resilience & Recovery)
 *目标：剪断网线，拔掉硬盘，系统依然可用。*
-- [ ] Client 实现后台 `LeaseRenewer` (租约保活)，NameNode 实现租约超时自动回收。
+- [ ] Client 实现后台 `LeaseRenewer` (租约保活)，NameNode 实现租约超时检测及 Lease Recovery 协调逻辑。
 - [ ] Client 实现 Pipeline Recovery 状态机（断点续传、踢出坏节点、触发 NameNode 升级 `gen_stamp`）。
 - [ ] DataNode 实现后台 `Block Scanner` 主动发现静默坏块；Client 实现 `ReportBadBlock` 被动举报。
 - [ ] NameNode 基于 `gen_stamp` 冲突裁决机制，通过心跳下发指令，完成块的重平衡 (Re-balancing)。

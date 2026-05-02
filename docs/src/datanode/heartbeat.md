@@ -22,6 +22,7 @@ DataNode 采用被动设计，NameNode 永远不会主动发起连接去询问 D
   * **管理指令 (`List<DataNodeCommand>`)**：
     * `ReplicateBlock`：指示该节点将本地某个块复制给其他目标节点（触发副本恢复）。
     * `DeleteBlock`：指示该节点物理删除本地的某个废弃块。
+    * `BlockRecoveryCommand`：租约恢复指令，本节点被指定为 Primary DN，需携带 `block_id`、`new_gen_stamp` 及所有副本地址列表，协调完成 Block Recovery。
   * **安全密钥 (`MasterKey`)**：
     * 下发 NameNode 当前正在使用的 Token 签发密钥（包含 Active 和 Standby）。DataNode 收到后立即更新本地内存中的 `SecretManager`，确保对后续 Client 的流式读写请求能够进行正确的 HMAC-SHA256 验签拦截。
 
@@ -91,6 +92,18 @@ pub async fn start_heartbeat_system(mut client: NameNodeServiceClient, secret_mg
   });
 }
 ```
+
+### 2.3 关键指令保序 (Critical Command Ordering)
+为防止背压导致关键容错指令（`ReplicateBlock`、`DeleteBlock`、`BlockRecoveryCommand`）丢失，在心跳指令分发环节增加以下机制：
+* **高优通道：** 为关键指令单独建立容量更大的 `mpsc` 通道，心跳循环优先将关键指令插入高优队列。
+* **超时发送：** 对高优通道使用 `send_timeout(Duration::from_millis(100))` 替代 `try_send`，在通道满时短暂等待而非直接丢弃。
+* **指标监控：** 记录关键指令的丢弃次数和通道拥塞时长，暴露为 Prometheus 指标，便于运维发现副本修复延迟。
+
+### 2.4 验签失败率监控 (SigVerify Failure Monitor)
+为防止网络分区或系统时钟偏移导致本地密钥全部失效，DataNode 需运行一个后台监控任务：
+* 每 10 秒检查最近 100 次 Token 验签的失败率。
+* 若失败率超过 5%，则在下一次心跳请求中将 `request_full_keys` 置为 true，NameNode 将无视常规下发策略，直接在响应中返回完整的 Active 和 Standby 密钥。
+* 此机制确保即便错过多次心跳导致密钥过期滞后，DataNode 也能快速恢复验签能力，避免 Client 请求被大量拒绝。
 
 ---
 

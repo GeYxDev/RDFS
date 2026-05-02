@@ -24,6 +24,10 @@
 Signature = HMAC-SHA256(MasterKey_id, Payload)
 ```
 
+### 1.3 使用次数
+* **写入令牌：** 单次有效，每个写入 Token 与特定的 `gen_stamp` 绑定，仅限当次写入管线的建立使用。一旦管线中断或文件关闭，该 Token 立即失效，Client 必须从 NameNode 重新申请。
+* **读取令牌：** 重复使用，只要在 `expiry_date` 之前且 `block_id` 未发生变更，Client 可多次使用同一个读取 Token 向不同 DataNode 发起读取请求，无需重复申请。
+
 ---
 
 ## 2. 核心工作流

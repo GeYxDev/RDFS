@@ -11,7 +11,7 @@
 * **流式传输 (Streaming)：** 凡是涉及实际文件数据（`bytes`）读写的接口，必须使用 gRPC 的 Stream 机制，严禁在单个一元 RPC (Unary RPC) 中打包超大字节数组。
 * **默认端口：**
   * NameNode RPC 服务：`9000`
-  * DataNode RPC 服务：动态分配，向 NameNode 注册时上报。
+  * DataNode RPC 服务：生产环境采用动态端口分配，向 NameNode 注册时上报，本地测试和调试环境可指定固定端口。
 
 ---
 
@@ -39,9 +39,16 @@
 
 ### 2.4 DataNodeCommand (元数据节点下发指令)
 NameNode 通过心跳响应向 DataNode 下发的管理指令。
-* `action` (enum)：指令类型（如 DELETE_BLOCK, REPLICATE_BLOCK 等）。
-* `target_block` (BlockInfo)：需要操作的数据块。
-* `dest_nodes` (List<DataNodeInfo>)：若为复制指令，此为目标节点列表。
+* `action` (enum)：指令类型，根据不同指令携带不同参数：
+  * `DELETE_BLOCK`：要求节点物理删除指定 Block。
+    * `target_block` (BlockInfo)：需要操作的数据块。
+  * `REPLICATE_BLOCK`：要求节点将指定 Block 复制给目标节点。
+    * `target_block` (BlockInfo)：需要操作的数据块。
+    * `dest_nodes` (List<DataNodeInfo>)：若为复制指令，此为目标节点列表。
+  * `BLOCK_RECOVERY`：租约恢复指令，指定本节点为 Primary DN，协调副本对齐。
+    * `block_id` (uint64)：需要恢复的数据块 ID。
+    * `new_gen_stamp` (uint64)：NameNode 为本次恢复生成的世代版本号。
+    * `replicas` (List<DataNodeInfo>)：持有该 Block 副本的所有 DataNode 列表（含 Primary 自身）。
 
 ### 2.5 Token (安全访问令牌)
 由 NameNode 签发，用于 DataNode 去中心化验证客户端权限的凭证。
@@ -57,14 +64,21 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
 ### 3.1 客户端 -> NameNode (Client to NameNode)
 
 #### 3.1.1 `CreateFile` (创建文件)
-* **场景：** 客户端请求在系统中创建一个新文件。
+* **场景：** 客户端请求在系统中创建新文件。
 * **Request：**
   * `path` (string)：文件的绝对路径（例如：`/data/logs/2026.log`）。
   * `client_id` (string)：当前发起写入的客户端的全局唯一标识符（使用 UUID）。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否创建成功。
 
-#### 3.1.2 `AllocateBlock` (申请数据块)
+#### 3.1.2 `MakeDirectory` (创建目录)
+* **场景：** 客户端请求在指定路径创建目录。
+* **Request：**
+  * `path` (string)：目录的绝对路径（例如：`/data/logs`）。
+* **Response：**
+  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否创建成功。
+
+#### 3.1.3 `AllocateBlock` (申请数据块)
 * **场景：** 客户端在写入文件时，发现当前块已写满（达到 64MB），向 NameNode 申请一个新的物理块和存储节点。
 * **Request：**
   * `path` (string)：文件路径。
@@ -72,16 +86,16 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
 * **Response：**
   * `located_block` (LocatedBlock)：返回新生成的 BlockID，以及系统分配的 3 个 DataNode 地址。
 
-#### 3.1.3 `CompleteFile` (提交文件写入结果)
+#### 3.1.4 `CompleteFile` (提交文件写入结果)
 * **场景：** 客户端完成文件所有数据块的流式写入后，告知 NameNode 文件已关闭，此时 NameNode 会将文件状态从 UNDER_CONSTRUCTION 转为 ACTIVE。
 * **Request：**
   * `path` (string)：文件路径。
   * `total_size` (uint64)：文件的最终总字节数。
   * `client_id` (string)：当前发起写入的客户端的全局唯一标识符（使用 UUID）。
 * **Response：**
-  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否提交成功。
+  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否提交成功（若文件最后一个 Block 已确认副本数不足，NameNode 将拒绝提交并返回 FAILED_PRECONDITION，Client 应重试或上报异常）。
 
-#### 3.1.4 `GetFileInfo` (获取文件定位)
+#### 3.1.5 `GetFileInfo` (获取文件定位)
 * **场景：** 客户端想要读取某个文件，需要先获取该文件的所有块清单及物理位置。
 * **Request：**
   * `path` (string)：文件路径。
@@ -90,14 +104,14 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `file_status` (enum)：文件当前状态。若客户端不支持脏读，NameNode 可直接对非 ACTIVE 文件返回 gRPC 错误。
   * `blocks` (List<LocatedBlock>)：该文件包含的所有数据块及其物理位置（按网络拓扑距离优化排序）。
 
-#### 3.1.5 `RenewLease` (租约续约)
+#### 3.1.6 `RenewLease` (租约续约)
 * **场景：** 客户端持有任何文件的写锁时，必须定期向 NameNode 发送心跳续约。
 * **Request：**
   * `client_id` (string)：当前发起写入的客户端的全局唯一标识符（使用 UUID）。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否续约成功。
 
-#### 3.1.6 `ReportBadBlock` (坏块举报)
+#### 3.1.7 `ReportBadBlock` (坏块举报)
 * **场景：** 客户端在流式读取 (`ReadBlock`) 时，对接收到的数据碎片进行校验。若发现实际数据与返回的校验和不匹配，客户端向 NameNode 举报该故障节点，并自行去其他副本节点读取。
 * **Request：**
   * `block_id` (uint64)：损坏的数据块 ID。
@@ -106,7 +120,7 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否举报成功。
 
-#### 3.1.7 `ReportFailedBlock` (管线故障上报)
+#### 3.1.8 `ReportFailedBlock` (管线故障上报)
 * **场景：** 写入过程中 Pipeline 内某 DataNode 宕机，Client 暂停写入，向 NameNode 报告故障节点并请求恢复授权。
 * **Request：**
   * `block_id` (uint64)：发生故障的数据块 ID。
@@ -117,7 +131,7 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `new_pipeline` (List<DataNodeInfo>)：剔除故障节点后的新管线列表。
   * `access_token` (Token)：携带新 `gen_stamp` 的写入权限 Token。
 
-#### 3.1.8 `CompleteBlockRecovery` (块恢复完成上报)
+#### 3.1.9 `CompleteBlockRecovery` (块恢复完成上报)
 * **场景：** Client 完成长度对齐、截断并更新幸存节点的 `gen_stamp` 后，通知 NameNode 最终状态，以便 NameNode 落盘并更新内存元数据。
 * **Request：**
   * `block_id` (uint64)：恢复完成的块 ID。
@@ -127,6 +141,22 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否更新成功。
 
+#### 3.1.10 `RecoverLease` (租约恢复请求)
+* **场景：** 新 Client 尝试打开一个处于 UNDER_CONSTRUCTION 状态的文件时，主动请求 NameNode 触发租约恢复。
+* **Request：**
+  * `path` (string)：需要恢复的文件路径。
+  * `client_id` (string)：发起请求的客户端标识。
+* **Response：**
+  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否恢复成功。
+
+#### 3.1.11 `SetReplication` (修改副本因子)
+* **场景：** 客户端修改指定文件的期望副本数。
+* **Request：**
+  * `path` (string)：目标文件路径。
+  * `replication` (uint16)：新的副本数。
+* **Response：**
+  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否修改成功。
+
 ### 3.2 DataNode -> NameNode (DataNode to NameNode)
 
 #### 3.2.1 `Heartbeat` (心跳包)
@@ -135,6 +165,7 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `node_info` (DataNodeInfo)：汇报自己的 IP 和端口。
   * `capacity` (uint64)：节点配置的总存储容量。
   * `used` (uint64)：节点当前已使用的容量。
+  * `request_full_keys` (bool)：可选字段，当 DataNode 检测到本地 Token 验签失败率超过阈值时可设置此字段，NameNode 将在本次心跳响应中强制下发完整的 Active/Standby 密钥列表。
 * **Response：**
   * `commands` (List<DataNodeCommand>)：NameNode 返回的异步指令（例如：要求该节点删除某个废弃的 Block，或将某个 Block 复制给其他节点）。
   * `master_keys` (List<bytes>)：NameNode 下发的当前有效密钥（Active Key 与 Standby Key），供 DataNode 缓存在本地用于 Token 验签验证。
@@ -154,6 +185,16 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `block` (BlockInfo)：已确认的块信息。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否汇报成功。
+
+#### 3.2.4 `CommitBlockRecovery` (块恢复完成上报)
+* **场景：** Primary DataNode 完成某一 Block 的租约恢复（长度对齐、`gen_stamp` 更新）后，向 NameNode 上报最终结果。
+* **Request：**
+  * `block_id` (uint64)：恢复完成的块 ID。
+  * `new_gen_stamp` (uint64)：恢复后生效的世代版本号。
+  * `final_length` (uint64)：对齐后的块最终大小。
+  * `primary_node_id` (string)：执行恢复的 Primary DataNode ID。
+* **Response：**
+  * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否上报成功。
 
 ---
 
@@ -209,3 +250,14 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `new_gen_stamp` (uint64)：新的世代版本号。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否处理成功。
+
+### 4.2 DataNode -> DataNode (DataNode to DataNode)
+
+#### 4.2.1 `InterDNRecoverBlock` (副本恢复协调)
+* **场景：** 租约恢复期间，Primary DataNode 向同一 Block 的其他副本 DataNode 查询落盘长度及提交状态。
+* **Request：**
+  * `block_id` (uint64)：目标块 ID。
+  * `new_gen_stamp` (uint64)：NameNode 为本次恢复指定的新世代版本号。
+* **Response：**
+  * `final_length` (uint64)：该节点实际落盘的字节数。
+  * `is_committed` (bool)：该副本是否曾收到 Client 的 COMMITTED 标记（即对应块已确认完成）。
