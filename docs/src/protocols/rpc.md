@@ -100,6 +100,7 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
   * `client_id` (string)：当前发起写入的客户端的全局唯一标识符（使用 UUID）。
 * **Response：**
   * *(Empty)*：请求体为空，通过 gRPC 状态码确认是否提交成功（若文件最后一个 Block 已确认副本数不足，NameNode 将拒绝提交并返回 FAILED_PRECONDITION，Client 应重试或上报异常）。
+* **幂等性：** 若文件已被标记为 `ACTIVE`，NameNode 收到重复的 `CompleteFile` 请求时应直接返回 `OK`，而非报错。Client 端应实现在收到超时或 `UNAVAILABLE` 后进行重试，直到成功或收到明确的失败（如 `NOT_FOUND`、`PERMISSION_DENIED`）。
 
 #### 3.1.5 `GetFileInfo` (获取文件定位)
 * **场景：** 客户端想要读取某个文件，需要先获取该文件的所有块清单及物理位置。

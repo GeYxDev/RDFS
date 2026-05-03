@@ -32,6 +32,8 @@ DataNode 属于典型的高 I/O 密集型应用。在 Rust 中，必须极其小
     * 接收任务在通道满时必须丢弃数据或断开连接，绝不阻塞等待。
     * 使用 `tokio::sync::Semaphore` 限制同时活跃的 Pipeline 数量（默认 100），超限时返回 `RESOURCE_EXHAUSTED`。
     * 定期启用 `tokio-console` 检测死锁。
+    * 管理指令可容忍短暂丢失，使用有界通道以及 `try_send`，通道满时丢弃新指令并记录日志。
+    * 写入数据 Chunk 不可丢失，应使用无界通道或 `tokio::sync::broadcast`，依赖 gRPC 的背压限速发送者，绝不主动丢弃。
 
 ## 📂 模块划分建议 (`src/`)
 

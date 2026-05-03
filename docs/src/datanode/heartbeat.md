@@ -36,6 +36,15 @@ DataNode 采用被动设计，NameNode 永远不会主动发起连接去询问 D
 * **行为：** DataNode 深度扫描本地存储目录，提取出所有 Block 的完整元数据：`[block_id, length, gen_stamp]`，打包发给 NameNode 进行全网对账。
 * **目的：** 应对网络分区、磁盘静默截断、节点假死等极端异常。NameNode 对比上报的 `gen_stamp` 与内存期望值执行 **世代版本号冲突裁决** 决定是否下发删除指令，是 **系统最终一致性的核心兜底机制**。
 
+### 1.5 垃圾回收 (Garbage Collection)
+* **触发时机：** 当 NameNode 执行 `DeleteNode` 删除文件后。
+* **行为：**
+  1. NameNode 从 `BlockMap` 中移除该文件关联的所有 Block 记录，但 **不立即下发删除指令**。
+  2. 在 DataNode 下一次心跳时，NameNode 比对心跳中携带的 `BlockInfo` 列表（全量或增量）与内存 `BlockMap`。
+  3. 若发现 DataNode 上报的某个 Block 在内存中已不存在（对应文件被删除），NameNode 在心跳响应中下发 `DeleteBlock` 指令。
+  4. DataNode 执行物理删除，并在成功后的下一次心跳中确认（可选）。
+* **目的：** 这种方式利用全量块汇报作为最终一致性兜底，避免了主动广播删除指令的复杂度。
+
 ---
 
 ## 2. 并发模型设计 (Concurrency Design)

@@ -17,7 +17,9 @@ Client 是 RDFS (Rust Distributed File System) 与外部世界交互的唯一大
 5. **透明容错与管线恢复 (Transparent Failover & Recovery)：**
     * **读取容错 (Read Tolerance)：** 遇到宕机或 Checksum 报错，静默切换至备用节点，并向 NameNode 举报坏块 (`ReportBadBlock`)。
     * **写入容错 (Pipeline Recovery)：** 写入中途遭遇节点宕机（或长时间收不到 ACK）时，静默执行“踢出坏节点 -> 升级 `gen_stamp` -> 长度对齐 -> 降级续传”的管线恢复复杂状态机，对上层 `AsyncWrite` 调用者完全透明。
+    * **恢复互斥 (Recovery Exclusion)：** 若 Client 在管线恢复时收到 `RESOURCE_EXHAUSTED` 错误，表示该 Block 正在被租约恢复或其他管线恢复操作处理，应等待随机退避（如 1-3 秒）后重试 `ReportFailedBlock`。
     * **提交重试 (Commit Retry)：** 在 `close()` 调用 `CompleteFile` 时，若 NameNode 因末块副本数不足而拒绝提交（竞态窗口），Client 必须自动重试（间隔 6 秒，最多 10 次），直到提交成功或超时失败。此过程对上层用户透明。
+    * **一致补偿 (Consistency Compensation)：** 若 `GetFileInfo` 返回 `UNDER_CONSTRUCTION` 状态，Client SDK 应自动在短时间内（最多 50ms）重试 2-3 次，因为文件可能已完成 `CompleteFile` 但 DashMap 尚未传播。若重试后仍为 `UNDER_CONSTRUCTION`，则向用户返回 `FileNotClosed` 错误。
 
 ## 📦 形态与接口定义 (API Design)
 

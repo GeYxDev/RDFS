@@ -159,4 +159,11 @@ impl NamespaceMap {
     * **写内存：** 日志落盘后，Actor 作为 **全系统唯一的写入者**，直接修改 `DashMap`（此时绝无其他线程与其竞争写锁，绝对不会发生死锁）。
 4. **返回结果：** 内存更新完毕后，通过 oneshot channel 唤醒 gRPC Handler 响应 Client。
 
+### 5.4 租约映射结构
+`LeaseManager` 内部维护两份映射：
+* `client_id -> Vec<file_path>`：一个客户端可能同时持有多个文件的租约。
+* `file_path -> (client_id, expiry_time)`：用于租约超时扫描。
+
+`RenewLease` 仅传递 `client_id`，NameNode 会为该客户端持有的 **所有文件** 续约。
+
 通过这一架构，RDFS 实现了 EditLog 与内存状态的 100% 严格一致，彻底移除了并发修改目录树的心智负担与死锁风险。
