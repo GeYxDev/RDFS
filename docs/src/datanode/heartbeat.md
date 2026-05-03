@@ -22,7 +22,7 @@ DataNode 采用被动设计，NameNode 永远不会主动发起连接去询问 D
   * **管理指令 (`List<DataNodeCommand>`)：**
     * `ReplicateBlock`：指示该节点将本地某个块复制给其他目标节点（触发副本恢复）。
     * `DeleteBlock`：指示该节点物理删除本地的某个废弃块。
-    * `BlockRecoveryCommand`：租约恢复指令，本节点被指定为 Primary DN，需携带 `block_id`、`new_gen_stamp` 及所有副本地址列表，协调完成 Block Recovery。
+    * `BlockRecovery`：租约恢复指令，本节点被指定为 Primary DN，需携带 `block_id`、`new_gen_stamp` 及所有副本地址列表，协调完成 Block Recovery。
   * **安全密钥 (`MasterKey`)：**
     * 下发 NameNode 当前正在使用的 Token 签发密钥（包含 Active 和 Standby）。DataNode 收到后立即更新本地内存中的 `SecretManager`，确保对后续 Client 的流式读写请求能够进行正确的 HMAC-SHA256 验签拦截。
 

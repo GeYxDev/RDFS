@@ -64,7 +64,7 @@ DataNode 作为“安检员”，拦截并校验所有的 I/O 请求：
 DataNode 需要知道 NameNode 的 `MasterKey` 才能进行验签。为避免性能瓶颈，RDFS 采用心跳通道进行密钥异步下发。
 
 ### 3.1 密钥下发
-DataNode 定期发送 `Heartbeat`。NameNode 会将当前的 `MasterKey` 封装为一种特殊的 `DataNodeCommand`，放在心跳的 Response 中下发给 DataNode，DataNode 收到后，将其缓存在本地内存的 `SecretManager` 中。
+DataNode 定期发送 `Heartbeat`。NameNode 在心跳的 Response 中通过独立的 `master_keys` 字段（与 `commands` 字段并列）下发当前的 MasterKey 列表（Active Key 与 Standby Key）。DataNode 收到后将其缓存在本地内存的 `SecretManager` 中。
 
 ### 3.2 密钥轮转状态机
 为了降低密钥泄露的风险，NameNode 默认每 24 小时轮转一次 MasterKey。系统同时保留两个版本的密钥以保证平滑过渡：

@@ -173,7 +173,7 @@ NameNode 只处理元数据，所有交互均为轻量级的一元 RPC。
 ### 3.2 DataNode -> NameNode (DataNode to NameNode)
 
 #### 3.2.1 `Heartbeat` (心跳包)
-* **场景：** DataNode 启动后，每隔固定时间（如 3 秒）向 NameNode 报活。NameNode 若连续 10 秒未收到心跳，则判定该节点宕机。
+* **场景：** DataNode 启动后，每隔固定时间（如 3 秒）向 NameNode 报活。NameNode 若连续 10 秒未收到心跳则判定该节点迟钝，超过 30 秒则判定为宕机。
 * **Request：**
   * `node_info` (DataNodeInfo)：汇报自己的 IP 和端口。
   * `capacity` (uint64)：节点配置的总存储容量。
